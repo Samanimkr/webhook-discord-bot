@@ -2,3 +2,8 @@ name = "webhook-discord-bot"
 main = "app.ts"
 compatibility_date = "2026-01-28"
 compatibility_flags = ["nodejs_compat"]
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true

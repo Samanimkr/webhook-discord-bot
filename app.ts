@@ -31,9 +31,9 @@ export default {
             return new Response("", {status: 500});
         }
 
-        let bodyBuffer: ArrayBuffer;
+        let bodyText: string;
         try {
-            bodyBuffer = await request.arrayBuffer();
+            bodyText = await request.text();
         } catch (error) {
             console.error(error);
             return new Response("", {status: 400});
@@ -46,7 +46,7 @@ export default {
         };
 
         try {
-            validateWebhook(bodyBuffer, headers, env.RENDER_WEBHOOK_SECRET);
+            validateWebhook(bodyText, headers, env.RENDER_WEBHOOK_SECRET);
         } catch (error) {
             console.error(error);
             if (error instanceof WebhookVerificationError) {
@@ -57,7 +57,6 @@ export default {
 
         let payload: WebhookPayload;
         try {
-            const bodyText = new TextDecoder().decode(bodyBuffer);
             payload = JSON.parse(bodyText);
         } catch (error) {
             console.error(error);
@@ -84,13 +83,12 @@ function getMissingEnvVars(env: Env): string[] {
 }
 
 function validateWebhook(
-    bodyBuffer: ArrayBuffer,
+    bodyText: string,
     headers: WebhookUnbrandedRequiredHeaders,
     secret: string,
 ) {
     const wh = new Webhook(secret);
-    const bodyBytes = new Uint8Array(bodyBuffer);
-    wh.verify(bodyBytes, headers);
+    wh.verify(bodyText, headers);
 }
 
 async function handleWebhook(payload: WebhookPayload, env: Env) {
