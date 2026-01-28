@@ -1,198 +1,233 @@
-import express, {NextFunction, Request, Response} from "express";
-import {Webhook, WebhookUnbrandedRequiredHeaders, WebhookVerificationError} from "standardwebhooks"
+import {Webhook, WebhookUnbrandedRequiredHeaders, WebhookVerificationError} from "standardwebhooks";
 import {RenderEvent, RenderService, WebhookPayload} from "./render";
-import {
-    ActionRowBuilder,
-    ButtonBuilder,
-    ButtonStyle,
-    Client,
-    EmbedBuilder,
-    Events,
-    GatewayIntentBits,
-    MessageActionRowComponentBuilder
-} from "discord.js";
 
-const app = express();
-const port = process.env.PORT || 3001;
-const renderWebhookSecret = process.env.RENDER_WEBHOOK_SECRET || '';
-if (!renderWebhookSecret ) {
-    console.error("Error: RENDER_WEBHOOK_SECRET is not set.");
-    process.exit(1);
+interface Env {
+    RENDER_WEBHOOK_SECRET: string;
+    RENDER_API_URL?: string;
+    RENDER_API_KEY: string;
+    DISCORD_TOKEN: string;
+    DISCORD_CHANNEL_ID: string;
 }
 
-
-const renderAPIURL = process.env.RENDER_API_URL || "https://api.render.com/v1"
-
-// To create a Render API key, follow instructions here: https://render.com/docs/api#1-create-an-api-key
-const renderAPIKey = process.env.RENDER_API_KEY || '';
-if (!renderAPIKey ) {
-    console.error("Error: RENDER_API_KEY is not set.");
-    process.exit(1);
+interface ExecutionContext {
+    waitUntil(promise: Promise<unknown>): void;
 }
 
-const discordToken = process.env.DISCORD_TOKEN || '';
-if (!discordToken ) {
-    console.error("Error: DISCORD_TOKEN is not set.");
-    process.exit(1);
+const DEFAULT_RENDER_API_URL = "https://api.render.com/v1";
+
+export default {
+    async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+        const url = new URL(request.url);
+        if (url.pathname !== "/webhook") {
+            return new Response("Not Found", {status: 404});
+        }
+        if (request.method !== "POST") {
+            return new Response("Method Not Allowed", {status: 405});
+        }
+
+        const missing = getMissingEnvVars(env);
+        if (missing.length > 0) {
+            console.error(`Missing env vars: ${missing.join(", ")}`);
+            return new Response("", {status: 500});
+        }
+
+        let bodyBuffer: ArrayBuffer;
+        try {
+            bodyBuffer = await request.arrayBuffer();
+        } catch (error) {
+            console.error(error);
+            return new Response("", {status: 400});
+        }
+
+        const headers: WebhookUnbrandedRequiredHeaders = {
+            "webhook-id": request.headers.get("webhook-id") || "",
+            "webhook-timestamp": request.headers.get("webhook-timestamp") || "",
+            "webhook-signature": request.headers.get("webhook-signature") || "",
+        };
+
+        try {
+            validateWebhook(bodyBuffer, headers, env.RENDER_WEBHOOK_SECRET);
+        } catch (error) {
+            console.error(error);
+            if (error instanceof WebhookVerificationError) {
+                return new Response("", {status: 400});
+            }
+            return new Response("", {status: 500});
+        }
+
+        let payload: WebhookPayload;
+        try {
+            const bodyText = new TextDecoder().decode(bodyBuffer);
+            payload = JSON.parse(bodyText);
+        } catch (error) {
+            console.error(error);
+            return new Response("", {status: 400});
+        }
+
+        ctx.waitUntil(handleWebhook(payload, env));
+        return new Response("{}", {
+            status: 200,
+            headers: {
+                "Content-Type": "application/json",
+            },
+        });
+    },
+};
+
+function getMissingEnvVars(env: Env): string[] {
+    const missing: string[] = [];
+    if (!env.RENDER_WEBHOOK_SECRET) missing.push("RENDER_WEBHOOK_SECRET");
+    if (!env.RENDER_API_KEY) missing.push("RENDER_API_KEY");
+    if (!env.DISCORD_TOKEN) missing.push("DISCORD_TOKEN");
+    if (!env.DISCORD_CHANNEL_ID) missing.push("DISCORD_CHANNEL_ID");
+    return missing;
 }
-const discordChannelID = process.env.DISCORD_CHANNEL_ID || '';
-if (!discordChannelID ) {
-    console.error("Error: DISCORD_CHANNEL_ID is not set.");
-    process.exit(1);
+
+function validateWebhook(
+    bodyBuffer: ArrayBuffer,
+    headers: WebhookUnbrandedRequiredHeaders,
+    secret: string,
+) {
+    const wh = new Webhook(secret);
+    const bodyBytes = new Uint8Array(bodyBuffer);
+    wh.verify(bodyBytes, headers);
 }
 
-// Create a new client instance
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
-// When the client is ready, run this code (only once).
-// The distinction between `client: Client<boolean>` and `readyClient: Client<true>` is important for TypeScript developers.
-// It makes some properties non-nullable.
-client.once(Events.ClientReady, readyClient => {
-    console.log(`Discord client setup! Logged in as ${readyClient.user.tag}`);
-});
-
-// Log in to Discord with your client's token
-client.login(discordToken).catch(err => {
-    console.error(`unable to connect to Discord: ${err}`);
-});
-
-app.post("/webhook", express.raw({type: 'application/json'}), (req: Request, res: Response, next: NextFunction) => {
-    try {
-        validateWebhook(req);
-    } catch (error) {
-        return next(error)
-    }
-
-    const payload: WebhookPayload = JSON.parse(req.body)
-
-    res.status(200).send({}).end()
-
-    // handle the webhook async so we don't timeout the request
-    handleWebhook(payload)
-});
-
-app.use((err: any, req: Request, res: Response, next: NextFunction) => {
-    console.error(err);
-    if (err instanceof WebhookVerificationError) {
-        res.status(400).send({}).end()
-    } else {
-        res.status(500).send({}).end()
-    }
-});
-
-const server = app.listen(port, () => console.log(`Example app listening on port ${port}!`));
-
-function validateWebhook(req: Request) {
-    const headers: WebhookUnbrandedRequiredHeaders = {
-        "webhook-id": req.header("webhook-id") || "",
-        "webhook-timestamp": req.header("webhook-timestamp") || "",
-        "webhook-signature": req.header("webhook-signature") || ""
-    }
-
-    const wh = new Webhook(renderWebhookSecret);
-    wh.verify(req.body, headers);
-}
-
-async function handleWebhook(payload: WebhookPayload) {
+async function handleWebhook(payload: WebhookPayload, env: Env) {
     try {
         switch (payload.type) {
-            case "server_failed":
-                const service = await fetchServiceInfo(payload)
-                const event = await fetchEventInfo(payload)
+            case "server_failed": {
+                const [service, event] = await Promise.all([
+                    fetchServiceInfo(payload, env),
+                    fetchEventInfo(payload, env),
+                ]);
 
-                console.log(`sending discord message for ${service.name}`)
-                await sendServerFailedMessage(service, event.details.reason)
-                return
+                console.log(`sending discord message for ${service.name}`);
+                await sendServerFailedMessage(service, event.details?.reason, env);
+                return;
+            }
             default:
-                console.log(`unhandled webhook type ${payload.type} for service ${payload.data.serviceId}`)
+                console.log(
+                    `unhandled webhook type ${payload.type} for service ${payload.data.serviceId}`,
+                );
         }
     } catch (error) {
-        console.error(error)
+        console.error(error);
     }
 }
 
-async function sendServerFailedMessage(service: RenderService, failureReason: any) {
-    const channel = await client.channels.fetch(discordChannelID);
-    if (!channel ){
-        throw new Error(`unable to find specified Discord channel ${discordChannelID}`);
+async function sendServerFailedMessage(
+    service: RenderService,
+    failureReason: any,
+    env: Env,
+) {
+    const description = formatFailureReason(failureReason);
+
+    const payload = {
+        embeds: [
+            {
+                color: 0xff5c88,
+                title: `${service.name} Failed`,
+                description,
+                url: service.dashboardUrl,
+            },
+        ],
+        components: [
+            {
+                type: 1,
+                components: [
+                    {
+                        type: 2,
+                        style: 5,
+                        label: "View Logs",
+                        url: `${service.dashboardUrl}/logs`,
+                    },
+                ],
+            },
+        ],
+    };
+
+    const res = await fetch(
+        `https://discord.com/api/v10/channels/${env.DISCORD_CHANNEL_ID}/messages`,
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bot ${env.DISCORD_TOKEN}`,
+            },
+            body: JSON.stringify(payload),
+        },
+    );
+
+    if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(
+            `Discord API error: ${res.status} ${res.statusText} - ${errorText}`,
+        );
     }
+}
 
-    const isSendable = channel.isSendable()
-    if (!isSendable) {
-        throw new Error(`specified Discord channel ${discordChannelID} is not sendable`);
+function formatFailureReason(failureReason: any): string {
+    if (failureReason?.nonZeroExit) {
+        return `Exited with status ${failureReason.nonZeroExit}`;
     }
-
-    let description = "Failed for unknown reason"
-    if (failureReason.nonZeroExit) {
-        description = `Exited with status ${failureReason.nonZeroExit}`
-    } else if (failureReason.oomKilled) {
-        description = `Out of Memory`
-    } else if (failureReason.timedOutSeconds) {
-        description = `Timed out ` + failureReason.timedOutReason
-    } else if (failureReason.unhealthy) {
-        description = failureReason.unhealthy
+    if (failureReason?.oomKilled) {
+        return "Out of Memory";
     }
-
-    const embed = new EmbedBuilder()
-        .setColor(`#FF5C88`)
-        .setTitle(`${service.name} Failed`)
-        .setDescription(description)
-        .setURL(service.dashboardUrl)
-
-    const logs = new ButtonBuilder()
-        .setLabel("View Logs")
-        .setURL(`${service.dashboardUrl}/logs`)
-        .setStyle(ButtonStyle.Link);
-    const row = new ActionRowBuilder<MessageActionRowComponentBuilder>()
-        .addComponents(logs);
-
-    channel.send({embeds: [embed], components: [row]})
+    if (failureReason?.timedOutSeconds) {
+        const reason = failureReason.timedOutReason || "";
+        return `Timed out ${reason}`.trim();
+    }
+    if (failureReason?.unhealthy) {
+        return failureReason.unhealthy;
+    }
+    return "Failed for unknown reason";
 }
 
 // fetchEventInfo fetches the event that triggered the webhook
 // some events have additional information that isn't in the webhook payload
 // for example, deploy events have the deploy id
-async function fetchEventInfo(payload: WebhookPayload): Promise<RenderEvent> {
-    const res = await fetch(
-        `${renderAPIURL}/events/${payload.data.id}`,
+async function fetchEventInfo(
+    payload: WebhookPayload,
+    env: Env,
+): Promise<RenderEvent> {
+    const res = await fetch(`${getRenderApiUrl(env)}/events/${payload.data.id}`,
         {
             method: "get",
             headers: {
                 "Content-Type": "application/json",
                 Accept: "application/json",
-                Authorization: `Bearer ${renderAPIKey}`,
+                Authorization: `Bearer ${env.RENDER_API_KEY}`,
             },
         },
-    )
+    );
     if (res.ok) {
-        return res.json()
-    } else {
-        throw new Error(`unable to fetch event info; received code :${res.status.toString()}`)
+        return res.json();
     }
+    throw new Error(`unable to fetch event info; received code :${res.status}`);
 }
 
-async function fetchServiceInfo(payload: WebhookPayload): Promise<RenderService> {
+async function fetchServiceInfo(
+    payload: WebhookPayload,
+    env: Env,
+): Promise<RenderService> {
     const res = await fetch(
-        `${renderAPIURL}/services/${payload.data.serviceId}`,
+        `${getRenderApiUrl(env)}/services/${payload.data.serviceId}`,
         {
             method: "get",
             headers: {
                 "Content-Type": "application/json",
                 Accept: "application/json",
-                Authorization: `Bearer ${renderAPIKey}`,
+                Authorization: `Bearer ${env.RENDER_API_KEY}`,
             },
         },
-    )
+    );
     if (res.ok) {
-        return res.json()
-    } else {
-        throw new Error(`unable to fetch service info; received code :${res.status.toString()}`)
+        return res.json();
     }
+    throw new Error(`unable to fetch service info; received code :${res.status}`);
 }
 
-process.on('SIGTERM', () => {
-    console.debug('SIGTERM signal received: closing HTTP server')
-    server.close(() => {
-        console.debug('HTTP server closed')
-    })
-})
+function getRenderApiUrl(env: Env) {
+    return env.RENDER_API_URL || DEFAULT_RENDER_API_URL;
+}

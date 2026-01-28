@@ -1,10 +1,13 @@
 {
   "compilerOptions": {
     "esModuleInterop": true,
-    "module": "commonjs",
-    "moduleResolution": "node",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "outDir": "dist",
     "strict": true,
-    "target": "es2024"
+    "target": "ES2024",
+    "lib": ["ES2024", "WebWorker"],
+    "types": ["@cloudflare/workers-types"],
+    "skipLibCheck": true
   }
 }
