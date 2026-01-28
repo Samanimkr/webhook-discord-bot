@@ -222,24 +222,12 @@ function buildEventFields(
     event: RenderEvent | null,
 ): Array<{name: string; value: string; inline?: boolean}> {
     const fields: Array<{name: string; value: string; inline?: boolean}> = [];
-    const serviceName =
-        payload.data.serviceName ||
-        service?.name ||
-        payload.data.serviceId ||
-        "unknown";
-
-    fields.push({name: "Service", value: serviceName, inline: true});
-    fields.push({
-        name: "Event",
-        value: humanizeEventType(payload.type),
-        inline: true,
-    });
 
     const timestamp = typeof payload.timestamp === "string"
         ? payload.timestamp
         : payload.timestamp?.toString?.() || "";
     if (timestamp) {
-        fields.push({name: "Time", value: formatTimestamp(timestamp), inline: true});
+        fields.push({name: "Time", value: formatTimestamp(timestamp), inline: false});
     }
 
     const status = payload.data?.status;
@@ -247,16 +235,7 @@ function buildEventFields(
         fields.push({name: "Status", value: humanizeStatus(status), inline: true});
     }
 
-    if (payload.data?.id) {
-        fields.push({name: "Event ID", value: payload.data.id, inline: false});
-    }
-
     const details = event?.details;
-    const buildId = details?.buildId || details?.build?.id;
-    if (buildId) {
-        fields.push({name: "Build ID", value: String(buildId), inline: false});
-    }
-
     const deployId = details?.deployId || details?.deploy?.id;
     if (deployId) {
         fields.push({name: "Deploy ID", value: String(deployId), inline: false});
@@ -272,11 +251,6 @@ function buildEventFields(
     if (payload.type === "server_failed") {
         const reason = formatFailureReason(details?.reason);
         fields.push({name: "Failure Reason", value: reason, inline: false});
-    } else if (details) {
-        const detailsText = formatDetailsForField(details);
-        if (detailsText) {
-            fields.push({name: "Details", value: detailsText, inline: false});
-        }
     }
 
     return fields;
@@ -287,7 +261,13 @@ function formatTimestamp(timestamp: string): string {
     if (Number.isNaN(date.getTime())) {
         return timestamp;
     }
-    return date.toISOString();
+    const formatted = date.toLocaleString("en-GB", {
+        dateStyle: "medium",
+        timeStyle: "short",
+        timeZone: "Europe/London",
+        timeZoneName: "short",
+    });
+    return formatted;
 }
 
 function formatTrigger(trigger: Record<string, unknown>): string {
@@ -295,17 +275,6 @@ function formatTrigger(trigger: Record<string, unknown>): string {
         .filter(([, value]) => typeof value !== "undefined")
         .map(([key, value]) => `${key}=${String(value)}`);
     return truncate(entries.join(", "), 1024);
-}
-
-function formatDetailsForField(details: unknown): string {
-    if (typeof details === "string") {
-        return truncate(details, 1024);
-    }
-    const json = safeJsonStringify(details);
-    if (!json) {
-        return "";
-    }
-    return truncate(json, 1024);
 }
 
 function humanizeEventType(value: string): string {
