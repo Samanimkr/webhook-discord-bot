@@ -5,8 +5,8 @@
     "moduleResolution": "Bundler",
     "outDir": "dist",
     "strict": true,
-    "target": "ES2024",
-    "lib": ["ES2024", "WebWorker"],
+    "target": "ES2022",
+    "lib": ["ES2022", "WebWorker"],
     "types": ["@cloudflare/workers-types"],
     "skipLibCheck": true
   }

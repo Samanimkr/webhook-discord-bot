@@ -92,45 +92,50 @@ function validateWebhook(
 }
 
 async function handleWebhook(payload: WebhookPayload, env: Env) {
-    try {
-        switch (payload.type) {
-            case "server_failed": {
-                const [service, event] = await Promise.all([
-                    fetchServiceInfo(payload, env),
-                    fetchEventInfo(payload, env),
-                ]);
+    let service: RenderService | null = null;
+    let event: RenderEvent | null = null;
 
-                console.log(`sending discord message for ${service.name}`);
-                await sendServerFailedMessage(service, event.details?.reason, env);
-                return;
-            }
-            default:
-                console.log(
-                    `unhandled webhook type ${payload.type} for service ${payload.data.serviceId}`,
-                );
-        }
+    try {
+        service = await fetchServiceInfo(payload, env);
+    } catch (error) {
+        console.error(error);
+    }
+
+    try {
+        event = await fetchEventInfo(payload, env);
+    } catch (error) {
+        console.error(error);
+    }
+
+    try {
+        await sendEventMessage(payload, service, event, env);
     } catch (error) {
         console.error(error);
     }
 }
 
-async function sendServerFailedMessage(
-    service: RenderService,
-    failureReason: any,
+async function sendEventMessage(
+    payload: WebhookPayload,
+    service: RenderService | null,
+    event: RenderEvent | null,
     env: Env,
 ) {
-    const description = formatFailureReason(failureReason);
+    const description = formatEventDescription(payload, event);
+    const title = formatEventTitle(payload, service);
 
-    const payload = {
+    const discordPayload: Record<string, unknown> = {
         embeds: [
             {
                 color: 0xff5c88,
-                title: `${service.name} Failed`,
+                title,
                 description,
-                url: service.dashboardUrl,
+                ...(service?.dashboardUrl ? {url: service.dashboardUrl} : {}),
             },
         ],
-        components: [
+    };
+
+    if (service?.dashboardUrl) {
+        discordPayload.components = [
             {
                 type: 1,
                 components: [
@@ -142,8 +147,8 @@ async function sendServerFailedMessage(
                     },
                 ],
             },
-        ],
-    };
+        ];
+    }
 
     const res = await fetch(
         `https://discord.com/api/v10/channels/${env.DISCORD_CHANNEL_ID}/messages`,
@@ -153,7 +158,7 @@ async function sendServerFailedMessage(
                 "Content-Type": "application/json",
                 Authorization: `Bot ${env.DISCORD_TOKEN}`,
             },
-            body: JSON.stringify(payload),
+            body: JSON.stringify(discordPayload),
         },
     );
 
@@ -163,6 +168,33 @@ async function sendServerFailedMessage(
             `Discord API error: ${res.status} ${res.statusText} - ${errorText}`,
         );
     }
+}
+
+function formatEventTitle(
+    payload: WebhookPayload,
+    service: RenderService | null,
+): string {
+    const name = service?.name || payload.data.serviceId || "Render Service";
+    return `${name} · ${payload.type}`;
+}
+
+function formatEventDescription(
+    payload: WebhookPayload,
+    event: RenderEvent | null,
+): string {
+    if (payload.type === "server_failed") {
+        const reason = event?.details?.reason;
+        return formatFailureReason(reason);
+    }
+
+    const parts = [`Event: ${payload.type}`];
+    if (event?.details) {
+        const detailsText = safeJsonStringify(event.details);
+        if (detailsText) {
+            parts.push(`Details: ${detailsText}`);
+        }
+    }
+    return truncate(parts.join("\n"), 4096);
 }
 
 function formatFailureReason(failureReason: any): string {
@@ -180,6 +212,25 @@ function formatFailureReason(failureReason: any): string {
         return failureReason.unhealthy;
     }
     return "Failed for unknown reason";
+}
+
+function safeJsonStringify(value: unknown): string {
+    if (typeof value === "string") {
+        return value;
+    }
+    try {
+        const result = JSON.stringify(value);
+        return result || "";
+    } catch {
+        return "";
+    }
+}
+
+function truncate(text: string, maxLength: number): string {
+    if (text.length <= maxLength) {
+        return text;
+    }
+    return `${text.slice(0, maxLength - 3)}...`;
 }
 
 // fetchEventInfo fetches the event that triggered the webhook
