@@ -120,15 +120,19 @@ async function sendEventMessage(
     event: RenderEvent | null,
     env: Env,
 ) {
+    const presentation = getEventPresentation(payload);
     const description = formatEventDescription(payload, event);
-    const title = formatEventTitle(payload, service);
+    const title = formatEventTitle(payload, service, presentation);
+    const color = presentation.color;
+    const fields = buildEventFields(payload, service, event);
 
     const discordPayload: Record<string, unknown> = {
         embeds: [
             {
-                color: 0xff5c88,
+                color,
                 title,
                 description,
+                fields,
                 ...(service?.dashboardUrl ? {url: service.dashboardUrl} : {}),
             },
         ],
@@ -173,9 +177,14 @@ async function sendEventMessage(
 function formatEventTitle(
     payload: WebhookPayload,
     service: RenderService | null,
+    presentation: EventPresentation,
 ): string {
-    const name = service?.name || payload.data.serviceId || "Render Service";
-    return `${name} · ${payload.type}`;
+    const name =
+        payload.data.serviceName ||
+        service?.name ||
+        payload.data.serviceId ||
+        "Render Service";
+    return `${presentation.emoji} ${name} — ${presentation.label}`;
 }
 
 function formatEventDescription(
@@ -187,14 +196,7 @@ function formatEventDescription(
         return formatFailureReason(reason);
     }
 
-    const parts = [`Event: ${payload.type}`];
-    if (event?.details) {
-        const detailsText = safeJsonStringify(event.details);
-        if (detailsText) {
-            parts.push(`Details: ${detailsText}`);
-        }
-    }
-    return truncate(parts.join("\n"), 4096);
+    return "";
 }
 
 function formatFailureReason(failureReason: any): string {
@@ -212,6 +214,169 @@ function formatFailureReason(failureReason: any): string {
         return failureReason.unhealthy;
     }
     return "Failed for unknown reason";
+}
+
+function buildEventFields(
+    payload: WebhookPayload,
+    service: RenderService | null,
+    event: RenderEvent | null,
+): Array<{name: string; value: string; inline?: boolean}> {
+    const fields: Array<{name: string; value: string; inline?: boolean}> = [];
+    const serviceName =
+        payload.data.serviceName ||
+        service?.name ||
+        payload.data.serviceId ||
+        "unknown";
+
+    fields.push({name: "Service", value: serviceName, inline: true});
+    fields.push({
+        name: "Event",
+        value: humanizeEventType(payload.type),
+        inline: true,
+    });
+
+    const timestamp = typeof payload.timestamp === "string"
+        ? payload.timestamp
+        : payload.timestamp?.toString?.() || "";
+    if (timestamp) {
+        fields.push({name: "Time", value: formatTimestamp(timestamp), inline: true});
+    }
+
+    const status = payload.data?.status;
+    if (status) {
+        fields.push({name: "Status", value: humanizeStatus(status), inline: true});
+    }
+
+    if (payload.data?.id) {
+        fields.push({name: "Event ID", value: payload.data.id, inline: false});
+    }
+
+    const details = event?.details;
+    const buildId = details?.buildId || details?.build?.id;
+    if (buildId) {
+        fields.push({name: "Build ID", value: String(buildId), inline: false});
+    }
+
+    const deployId = details?.deployId || details?.deploy?.id;
+    if (deployId) {
+        fields.push({name: "Deploy ID", value: String(deployId), inline: false});
+    }
+
+    if (details?.trigger) {
+        const triggerText = formatTrigger(details.trigger);
+        if (triggerText) {
+            fields.push({name: "Trigger", value: triggerText, inline: false});
+        }
+    }
+
+    if (payload.type === "server_failed") {
+        const reason = formatFailureReason(details?.reason);
+        fields.push({name: "Failure Reason", value: reason, inline: false});
+    } else if (details) {
+        const detailsText = formatDetailsForField(details);
+        if (detailsText) {
+            fields.push({name: "Details", value: detailsText, inline: false});
+        }
+    }
+
+    return fields;
+}
+
+function formatTimestamp(timestamp: string): string {
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) {
+        return timestamp;
+    }
+    return date.toISOString();
+}
+
+function formatTrigger(trigger: Record<string, unknown>): string {
+    const entries = Object.entries(trigger)
+        .filter(([, value]) => typeof value !== "undefined")
+        .map(([key, value]) => `${key}=${String(value)}`);
+    return truncate(entries.join(", "), 1024);
+}
+
+function formatDetailsForField(details: unknown): string {
+    if (typeof details === "string") {
+        return truncate(details, 1024);
+    }
+    const json = safeJsonStringify(details);
+    if (!json) {
+        return "";
+    }
+    return truncate(json, 1024);
+}
+
+function humanizeEventType(value: string): string {
+    return value
+        .split("_")
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(" ");
+}
+
+function humanizeStatus(value: string): string {
+    return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+interface EventPresentation {
+    label: string;
+    emoji: string;
+    color: number;
+}
+
+function getEventPresentation(payload: WebhookPayload): EventPresentation {
+    const eventType = payload.type;
+    const status = payload.data?.status;
+
+    if (status) {
+        if (status === "failed") {
+            return {label: `${humanizeEventType(eventType)} Failed`, emoji: "❌", color: 0xef4444};
+        }
+        if (status === "canceled") {
+            return {label: `${humanizeEventType(eventType)} Canceled`, emoji: "⚠️", color: 0xf59e0b};
+        }
+        if (status === "succeeded") {
+            return {label: `${humanizeEventType(eventType)} Succeeded`, emoji: "✅", color: 0x22c55e};
+        }
+    }
+
+    switch (eventType) {
+        case "server_failed":
+        case "image_pull_failed":
+        case "key_value_unhealthy":
+        case "pipeline_minutes_exhausted":
+        case "server_hardware_failure":
+            return {label: humanizeEventType(eventType), emoji: "❌", color: 0xef4444};
+        case "commit_ignored":
+        case "maintenance_mode_enabled":
+        case "maintenance_mode_uri_updated":
+            return {label: humanizeEventType(eventType), emoji: "⚠️", color: 0xf59e0b};
+        case "autoscaling_started":
+        case "build_started":
+        case "deploy_started":
+        case "cron_job_run_started":
+        case "job_run_started":
+        case "maintenance_started":
+        case "zero_downtime_redeploy_started":
+            return {label: humanizeEventType(eventType), emoji: "⏳", color: 0x94a3b8};
+        case "autoscaling_ended":
+        case "build_ended":
+        case "deploy_ended":
+        case "cron_job_run_ended":
+        case "job_run_ended":
+        case "maintenance_ended":
+        case "zero_downtime_redeploy_ended":
+        case "server_available":
+        case "service_resumed":
+            return {label: humanizeEventType(eventType), emoji: "✅", color: 0x22c55e};
+        case "server_restarted":
+            return {label: humanizeEventType(eventType), emoji: "🔄", color: 0x3b82f6};
+        case "service_suspended":
+            return {label: humanizeEventType(eventType), emoji: "⏸️", color: 0xf59e0b};
+        default:
+            return {label: humanizeEventType(eventType), emoji: "ℹ️", color: 0x94a3b8};
+    }
 }
 
 function safeJsonStringify(value: unknown): string {
